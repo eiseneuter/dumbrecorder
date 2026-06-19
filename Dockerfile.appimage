@@ -6,6 +6,8 @@ ENV APPIMAGE_EXTRACT_AND_RUN=1
 # The portable CPython (python-build-standalone) brings its own interpreter and
 # pip, so we do NOT need python3 / python3-venv / python3-pip here. We only need
 # tooling to download it, plus ffmpeg to bundle for GIF export.
+# libxkbcommon-x11-0 and libxcb-cursor0 are bundled into the AppImage so Qt's
+# xcb platform plugin loads even on bare/minimal hosts (e.g. AppImageHub CI).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -14,6 +16,8 @@ RUN apt-get update \
         grep \
         tar \
         ffmpeg \
+        libxkbcommon-x11-0 \
+        libxcb-cursor0 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
