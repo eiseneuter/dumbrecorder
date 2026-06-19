@@ -6,9 +6,16 @@ BUILD_DIR="$ROOT_DIR/build"
 DIST_DIR="$ROOT_DIR/dist"
 TOOLS_DIR="$ROOT_DIR/tools"
 APPDIR="$BUILD_DIR/AppDir"
-VENV_DIR="$APPDIR/usr/venv"
+PYTHON_DIR="$APPDIR/usr/python"
 APPIMAGE_TOOL="$TOOLS_DIR/appimagetool-x86_64.AppImage"
 APPSTREAM_FILE="$ROOT_DIR/io.github.eisen.DumbRecorder.metainfo.xml"
+
+# Portable CPython (python-build-standalone) gives the AppImage its own
+# self-contained interpreter + site-packages, so it never depends on the host
+# Python version. A venv that symlinks the system interpreter is NOT portable
+# across Python versions and breaks in clean environments (e.g. AppImageHub CI).
+PYTHON_BUILD_STANDALONE_REPO="astral-sh/python-build-standalone"
+PYTHON_VERSION="3.12"
 
 if [ -d "$APPDIR" ] && ! rm -rf "$APPDIR"; then
   echo "ERROR: Could not remove existing AppDir." >&2
@@ -23,9 +30,65 @@ mkdir -p \
   "$APPDIR/usr/share/icons/hicolor/256x256/apps" \
   "$APPDIR/usr/share/metainfo"
 
-python3 -m venv "$VENV_DIR"
-"$VENV_DIR/bin/python" -m pip install --upgrade pip
-"$VENV_DIR/bin/python" -m pip install -r "$ROOT_DIR/requirements.txt"
+ARCH=$(uname -m)
+case "$ARCH" in
+  x86_64)  PY_ARCH="x86_64-unknown-linux-gnu" ;;
+  aarch64) PY_ARCH="aarch64-unknown-linux-gnu" ;;
+  *) echo "ERROR: unsupported architecture $ARCH" >&2; exit 1 ;;
+esac
+
+echo "Fetching latest python-build-standalone release (Python ${PYTHON_VERSION}, ${PY_ARCH})..."
+# python-build-standalone is pre-release-only, so /releases/latest is empty;
+# use the releases list and pick the newest tag. -L follows the repo redirect.
+PBS_TAG=$(curl -sL "https://api.github.com/repos/${PYTHON_BUILD_STANDALONE_REPO}/releases?per_page=1" \
+  | grep '"tag_name"' | head -1 | cut -d'"' -f4 || true)
+
+if [ -z "$PBS_TAG" ]; then
+  echo "ERROR: could not determine latest python-build-standalone release." >&2
+  exit 1
+fi
+echo "Latest release tag: ${PBS_TAG}"
+
+# Find the install_only asset matching our Python version and arch.
+PBS_ASSET=$(curl -sL "https://api.github.com/repos/${PYTHON_BUILD_STANDALONE_REPO}/releases/tags/${PBS_TAG}" \
+  | grep '"browser_download_url"' \
+  | grep -o "https://[^\"]*cpython-${PYTHON_VERSION}\.[^\"]*${PY_ARCH}-install_only\.tar\.gz" \
+  | sort -V | tail -1 || true)
+
+if [ -z "$PBS_ASSET" ]; then
+  echo "ERROR: no python-build-standalone install_only asset found for Python ${PYTHON_VERSION} ${PY_ARCH} in tag ${PBS_TAG}." >&2
+  exit 1
+fi
+
+echo "Downloading: $PBS_ASSET"
+PBS_TARBALL="$BUILD_DIR/cpython-install_only.tar.gz"
+curl -Lf "$PBS_ASSET" -o "$PBS_TARBALL"
+
+echo "Extracting portable CPython into AppDir..."
+rm -rf "$PYTHON_DIR"
+mkdir -p "$PYTHON_DIR"
+tar -xzf "$PBS_TARBALL" -C "$PYTHON_DIR" --strip-components=1
+rm -f "$PBS_TARBALL"
+
+PY_BIN="$PYTHON_DIR/bin/python3"
+if [ ! -x "$PY_BIN" ]; then
+  echo "ERROR: portable python not found at $PY_BIN after extraction." >&2
+  exit 1
+fi
+
+echo "Portable Python: $("$PY_BIN" --version)"
+
+# Bootstrap pip inside the portable interpreter, then install requirements.
+"$PY_BIN" -m ensurepip --upgrade >/dev/null 2>&1 || true
+"$PY_BIN" -m pip install --upgrade pip
+"$PY_BIN" -m pip install -r "$ROOT_DIR/requirements.txt"
+
+# Sanity: PySide6 must actually be importable inside the bundled interpreter.
+if ! "$PY_BIN" -c "import PySide6" >/dev/null 2>&1; then
+  echo "ERROR: PySide6 is not importable in the bundled Python. Aborting." >&2
+  exit 1
+fi
+echo "PySide6 OK in bundled Python."
 
 cp -r "$ROOT_DIR/dumb_recorder" "$APPDIR/usr/bin/dumb_recorder"
 cp "$ROOT_DIR/dumbrecordericon.png" "$APPDIR/usr/bin/dumbrecordericon.png"
@@ -39,7 +102,6 @@ if [ -f "$APPSTREAM_FILE" ]; then
 fi
 
 GSR_BIN="$APPDIR/usr/bin/gpu-screen-recorder"
-ARCH=$(uname -m)
 echo "Fetching gpu-screen-recorder from GitHub Releases..."
 GSR_VERSION=$(curl -sf "https://api.github.com/repos/dec05eba/gpu-screen-recorder/releases/latest" \
   | grep '"tag_name"' | cut -d'"' -f4 || true)
@@ -71,7 +133,11 @@ cat > "$APPDIR/usr/bin/dumb-recorder" <<'APP_EOF'
 APPDIR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export PATH="$APPDIR_ROOT/usr/bin:$PATH"
 export PYTHONNOUSERSITE=1
+export PYTHONHOME="$APPDIR_ROOT/usr/python"
 export PYTHONPATH="$APPDIR_ROOT/usr/bin"
+# The portable CPython ships its own libpython and shared libs; make sure they
+# resolve regardless of the host's library layout.
+export LD_LIBRARY_PATH="$APPDIR_ROOT/usr/python/lib:${LD_LIBRARY_PATH:-}"
 
 # On Wayland: use KMS/X11 mode only when gsr-kms-server is available in the system PATH
 # (it needs cap_sys_admin set by the package manager and cannot be bundled in an AppImage).
@@ -83,7 +149,7 @@ if [ "${XDG_SESSION_TYPE:-}" = "wayland" ] && [ -z "${QT_QPA_PLATFORM:-}" ]; the
 fi
 
 cd "$APPDIR_ROOT/usr/bin"
-exec "$APPDIR_ROOT/usr/venv/bin/python" -m dumb_recorder "$@"
+exec "$APPDIR_ROOT/usr/python/bin/python3" -m dumb_recorder "$@"
 APP_EOF
 chmod +x "$APPDIR/usr/bin/dumb-recorder"
 
@@ -108,10 +174,10 @@ if [ ! -x "$APPIMAGE_TOOL" ]; then
   echo "Could not download appimagetool-x86_64.AppImage." >&2
   echo "Download it from https://github.com/AppImage/AppImageKit/releases and place it here, or install appimagetool system-wide." >&2
   if command -v appimagetool >/dev/null 2>&1; then
-    appimagetool "$APPDIR" "$DIST_DIR/Dumb_Recorder-x86_64.AppImage"
+    appimagetool "$APPDIR" "$DIST_DIR/DumbRecorder.AppImage"
     exit 0
   fi
   exit 1
 fi
 
-APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGE_TOOL" "$APPDIR" "$DIST_DIR/Dumb_Recorder-x86_64.AppImage"
+APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGE_TOOL" "$APPDIR" "$DIST_DIR/DumbRecorder.AppImage"
