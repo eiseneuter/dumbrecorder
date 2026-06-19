@@ -128,6 +128,27 @@ if command -v ffmpeg >/dev/null 2>&1; then
   cp "$(command -v ffmpeg)" "$APPDIR/usr/bin/ffmpeg"
 fi
 
+# Bundle the Qt xcb platform plugin's runtime dependencies so the AppImage can
+# initialize a GUI even on bare/minimal hosts (e.g. AppImageHub CI sandboxes)
+# that lack libxkbcommon-x11 / libxcb-cursor. These are copied from the build
+# environment (Docker image installs libxkbcommon-x11-0 and libxcb-cursor0).
+mkdir -p "$APPDIR/usr/lib"
+copy_lib() {
+  local lib="$1"
+  local found
+  found="$(find /usr/lib -name "${lib}*" 2>/dev/null | head -1 || true)"
+  if [ -n "$found" ]; then
+    cp -L $found "$APPDIR/usr/lib/"
+    echo "Bundled: $(basename "$found")"
+  else
+    echo "WARNING: ${lib} not found in build environment; not bundled." >&2
+  fi
+}
+copy_lib "libxkbcommon-x11.so.0"
+copy_lib "libxcb-cursor.so.0"
+# libxkbcommon-x11 depends on libxkbcommon.so.0; bundle it too if present.
+copy_lib "libxkbcommon.so.0"
+
 cat > "$APPDIR/usr/bin/dumb-recorder" <<'APP_EOF'
 #!/usr/bin/env bash
 APPDIR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -137,7 +158,7 @@ export PYTHONHOME="$APPDIR_ROOT/usr/python"
 export PYTHONPATH="$APPDIR_ROOT/usr/bin"
 # The portable CPython ships its own libpython and shared libs; make sure they
 # resolve regardless of the host's library layout.
-export LD_LIBRARY_PATH="$APPDIR_ROOT/usr/python/lib:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="$APPDIR_ROOT/usr/python/lib:$APPDIR_ROOT/usr/lib:${LD_LIBRARY_PATH:-}"
 
 # On Wayland: use KMS/X11 mode only when gsr-kms-server is available in the system PATH
 # (it needs cap_sys_admin set by the package manager and cannot be bundled in an AppImage).
