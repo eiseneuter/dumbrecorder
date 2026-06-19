@@ -58,12 +58,14 @@ Settings are stored in:
 ./build_appimage.sh
 ```
 
-The build script creates `build/AppDir`, installs the Python dependencies into `build/AppDir/usr/venv`, copies the app, icon, `.desktop` file, AppStream metadata, and bundles `gpu-screen-recorder` plus `ffmpeg` when available. If `gpu-screen-recorder` cannot be bundled, the AppImage uses the host installation from `PATH` at runtime.
+The build script creates `build/AppDir` and bundles a **portable CPython interpreter** (from [python-build-standalone](https://github.com/astral-sh/python-build-standalone)) into `build/AppDir/usr/python`. PySide6 is installed into that bundled interpreter's site-packages. This makes the AppImage fully self-contained: it never depends on the host Python version, so it runs in clean environments (e.g. automated CI/test sandboxes) where the host Python may be a different version or missing entirely.
+
+The script also copies the app, icon, `.desktop` file, AppStream metadata, and bundles `gpu-screen-recorder` plus `ffmpeg` when available. If `gpu-screen-recorder` cannot be bundled, the AppImage uses the host installation from `PATH` at runtime.
 
 Output:
 
 ```text
-dist/Dumb_Recorder-x86_64.AppImage
+dist/DumbRecorder.AppImage
 ```
 
 Important host dependencies still remain host dependencies: GPU drivers, PipeWire, portals, and any privileged `gpu-screen-recorder` helper such as `gsr-kms-server` must match the running system and cannot be reliably bundled into an AppImage.
