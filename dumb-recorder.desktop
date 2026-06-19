@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Dumb Recorder
+Comment=Simple Wayland region recorder
+Exec=dumb-recorder
+Icon=dumbrecordericon
+Terminal=false
+Categories=AudioVideo;Recorder;
