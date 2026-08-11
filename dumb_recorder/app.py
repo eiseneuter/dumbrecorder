@@ -20,7 +20,7 @@ try:
 except ImportError:
     keyboard = None
 
-from PySide6.QtCore import QEasingCurve, QPoint, QPointF, QRect, QRectF, QSize, Qt, QEvent, QPropertyAnimation, QTimer, Signal
+from PySide6.QtCore import QEasingCurve, QPoint, QPointF, QRect, QRectF, QSize, Qt, QEvent, QPropertyAnimation, QTimer, Signal, QThread
 from PySide6.QtGui import QAction, QColor, QCursor, QGuiApplication, QIcon, QPainter, QPixmap, QPen, QBrush, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -204,6 +204,20 @@ class Settings:
         except: pass
 
 
+class ConvertThread(QThread):
+    finished_signal = Signal(bool, str, str)
+
+    def __init__(self, engine, source, target):
+        super().__init__()
+        self.engine = engine
+        self.source = source
+        self.target = target
+
+    def run(self):
+        success, msg = self.engine.convert_or_move(self.source, self.target)
+        self.finished_signal.emit(success, msg, str(self.target))
+
+
 class RecorderEngine:
     def __init__(self, parent: QWidget) -> None:
         self.parent = parent
@@ -278,11 +292,10 @@ class RecorderEngine:
         pw, ph = round(capture.width() * dpr), round(capture.height() * dpr)
         region = f"{pw}x{ph}+{px}+{py}"
 
-        # If we are on Wayland AND not using the X11 trick (xcb), or gsr is missing, use portal
-        is_wayland = os.environ.get("XDG_SESSION_TYPE") == "wayland"
-        is_xcb = os.environ.get("QT_QPA_PLATFORM") == "xcb"
+        # Check if we are on Wayland (either XDG_SESSION_TYPE or WAYLAND_DISPLAY)
+        is_wayland = os.environ.get("XDG_SESSION_TYPE") == "wayland" or bool(os.environ.get("WAYLAND_DISPLAY"))
 
-        if (is_wayland and not is_xcb) or not shutil.which("gpu-screen-recorder"):
+        if is_wayland or not shutil.which("gpu-screen-recorder"):
             return self._start_portal_fallback(capture, fps, cursor, audio, source, screen, dpr)
 
         cmd = ["gpu-screen-recorder", "-w", region, "-f", str(fps), "-cursor", "yes" if cursor else "no", "-c", "mp4", "-k", "h264", "-ac", "aac", "-o", ""]
@@ -305,7 +318,8 @@ class RecorderEngine:
             if self.process.poll() is not None:
                 err_msg = "\n".join(self.output_lines[-20:])
                 LOG.error(f"Recorder failed immediately: {err_msg}")
-                return False, err_msg
+                LOG.info("Attempting automatic fallback to portal mode...")
+                return self._start_portal_fallback(capture, fps, cursor, audio, source, screen, dpr)
             return True, ""
         except Exception as exc:
             LOG.error(f"Start exception: {exc}")
@@ -371,7 +385,10 @@ class RecorderEngine:
             if temp and temp.exists() and temp.stat().st_size > 0:
                 return temp, ""
             time.sleep(0.1)
-        return temp, "" if (temp and temp.exists()) else "File not created"
+        err_msg = "File not created"
+        if self.output_lines:
+            err_msg += f":\n" + "\n".join(self.output_lines[-10:])
+        return temp, err_msg if not (temp and temp.exists() and temp.stat().st_size > 0) else ""
 
     def convert_or_move(self, source: Path, target: Path) -> tuple[bool, str]:
         try:
@@ -410,7 +427,7 @@ class RecorderWindow(QWidget):
         self._resize_start_capture: QRect | None = None
         self.hotkey_signal.connect(self._hotkey_triggered); self._setup_global_hotkey()
         self.setWindowTitle(APP_NAME); self.app_icon = QIcon(str(self.resource_path("dumbrecordericon.png")))
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.NoDropShadowWindowHint)
+        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.NoDropShadowWindowHint | Qt.WindowTitleHint | Qt.WindowSystemMenuHint | Qt.WindowMinMaxButtonsHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_NoSystemBackground)
         # Window width is always >= TOOLBAR_W so the toolbar child widget is never clipped.
@@ -424,12 +441,14 @@ class RecorderWindow(QWidget):
         def on_press(key):
             try:
                 k = key.char.lower() if hasattr(key, 'char') and key.char else str(key).replace("Key.", "").lower()
+                k = k.replace('_l', '').replace('_r', '')
                 self.pressed_keys.add(k)
                 if all(x in self.pressed_keys for x in ('ctrl', 'shift', 'r')): self.hotkey_signal.emit()
             except: pass
         def on_release(key):
             try:
                 k = key.char.lower() if hasattr(key, 'char') and key.char else str(key).replace("Key.", "").lower()
+                k = k.replace('_l', '').replace('_r', '')
                 self.pressed_keys.discard(k)
             except: pass
         self.hotkey_listener = keyboard.Listener(on_press=on_press, on_release=on_release); self.hotkey_listener.start()
@@ -517,13 +536,13 @@ class RecorderWindow(QWidget):
         self.toolbar.installEventFilter(self)
         self._on_format_changed()
         self.setStyleSheet(f"""
-            QWidget {{ color: white; font-family: sans-serif; font-size: 13px; }}
-            QComboBox {{ background: #2a2a2a; border: 1px solid #3d3d3d; border-radius: 6px; padding: 4px; color: white; qproperty-elideMode: ElideRight; }}
-            QComboBox::drop-down {{ border: 0px; width: 0px; }}
-            QComboBox::down-arrow {{ image: none; }}
-            QComboBox QAbstractItemView {{ background-color: #2a2a2a; selection-background-color: #444444; color: white; outline: none; border: 1px solid #3d3d3d; }}
-            QComboBox QAbstractItemView::item {{ min-height: 28px; padding-left: 10px; }}
-            #sizeLabel, #hotkeyLabel {{ background: rgba(0,0,0,160); color: {GREEN}; border-radius: 7px; padding: 4px 8px; }}
+            ToolbarFrame, ToolbarFrame QLabel, ToolbarFrame QPushButton, ToolbarFrame QToolButton, ToolbarFrame QCheckBox {{ color: white; font-family: sans-serif; font-size: 13px; }}
+            ToolbarFrame QComboBox {{ background: #2a2a2a; border: 1px solid #3d3d3d; border-radius: 6px; padding: 4px; color: white; qproperty-elideMode: ElideRight; }}
+            ToolbarFrame QComboBox::drop-down {{ border: 0px; width: 0px; }}
+            ToolbarFrame QComboBox::down-arrow {{ image: none; }}
+            ToolbarFrame QComboBox QAbstractItemView {{ background-color: #2a2a2a; selection-background-color: #444444; color: white; outline: none; border: 1px solid #3d3d3d; }}
+            ToolbarFrame QComboBox QAbstractItemView::item {{ min-height: 28px; padding-left: 10px; }}
+            #sizeLabel, #hotkeyLabel {{ background: rgba(0,0,0,160); color: {GREEN}; border-radius: 7px; padding: 4px 8px; font-family: sans-serif; font-size: 13px; }}
         """)
 
     def _capture_rect(self) -> QRect:
@@ -754,9 +773,17 @@ class RecorderWindow(QWidget):
         target, _ = QFileDialog.getSaveFileName(self, "Save", str(Path.home()/"Videos"/f"rec_{stamp}.{ext}"))
 
         if target:
-            success, msg = self.engine.convert_or_move(temp_path, Path(target))
-            if not success:
-                QMessageBox.critical(self, "FFmpeg Error", f"Failed to process video:\n{msg}")
+            self.record_btn.setEnabled(False)
+            self.tray_record_action.setEnabled(False)
+            self.convert_thread = ConvertThread(self.engine, temp_path, Path(target))
+            self.convert_thread.finished_signal.connect(self._on_convert_finished)
+            self.convert_thread.start()
+
+    def _on_convert_finished(self, success: bool, msg: str, target: str) -> None:
+        self.record_btn.setEnabled(True)
+        self.tray_record_action.setEnabled(True)
+        if not success:
+            QMessageBox.critical(self, "FFmpeg Error", f"Failed to process video:\n{msg}")
 
     def _save_settings(self):
         g = self.geometry(); self.settings.x, self.settings.y = g.x(), g.y()
