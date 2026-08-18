@@ -394,7 +394,11 @@ class RecorderEngine:
         try:
             if self.crop_after_recording:
                 cropped = source.with_name(f"cropped_{source.name}")
-                crop = f"crop={self.crop_region.width()}:{self.crop_region.height()}:{self.crop_region.x()}:{self.crop_region.y()}"
+                cw = max(1, self.crop_region.width())
+                ch = max(1, self.crop_region.height())
+                cx = max(0, self.crop_region.x())
+                cy = max(0, self.crop_region.y())
+                crop = f"crop=min(iw\\,{cw}):min(ih\\,{ch}):max(0\\,min(iw-ow\\,{cx})):max(0\\,min(ih-oh\\,{cy}))"
                 res = subprocess.run(["ffmpeg", "-y", "-i", str(source), "-vf", crop, "-c:a", "copy", str(cropped)], capture_output=True, text=True)
                 if res.returncode != 0: return False, res.stderr
                 source = cropped
